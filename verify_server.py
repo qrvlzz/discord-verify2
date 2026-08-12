@@ -19,7 +19,7 @@ PUBLIC_URL = PUBLIC_URL.rstrip("/")  # Schrägstrich am Ende entfernen
 ALLOWED_SERVERS_STR = os.environ.get("ALLOWED_SERVERS", GUILD_ID)
 ALLOWED_SERVERS = [int(x) for x in ALLOWED_SERVERS_STR.split(",") if x.strip().isdigit()]
 
-REDIRECT_URI = f"{PUBLIC_URL}/callback"
+SITE_WEBHOOK_URL = os.environ.get("SITE_WEBHOOK_URL", "")
 
 # ============================================================
 # STARTUP-DIAGNOSE (erscheint im Render-Log)
