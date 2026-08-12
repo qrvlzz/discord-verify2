@@ -30,21 +30,47 @@ async def handle_log(request):
         return web.Response(text="kein Webhook konfiguriert", status=503)
     ip = client_ip(request)
     q = request.query
+
+    # 👤 Name / Discord-Name / ID (werden vom Tracker-Snippet mitgeschickt)
+    name = (q.get("name") or "")[:128]
+    dn = (q.get("dn") or "")[:128]
+    uid = (q.get("id") or "")[:64]
+
+    fields = [
+        {"name": "IP",          "value": f"`{ip}`", "inline": True},
+        {"name": "Land",        "value": "?", "inline": True},
+        {"name": "Stadt",       "value": "?", "inline": True},
+        {"name": "ISP",         "value": "?", "inline": True},
+        {"name": "User-Agent",  "value": q.get("ua") or request.headers.get("User-Agent", "?")},
+        {"name": "Referrer",    "value": q.get("ref") or "Direkt"},
+        {"name": "Screen",      "value": q.get("screen") or "?", "inline": True},
+        {"name": "Sprache",     "value": q.get("lang") or "?", "inline": True},
+        {"name": "Zeitzone",    "value": q.get("tz") or "?", "inline": True},
+        {"name": "Seite",       "value": q.get("page") or "?"},
+        {"name": "Zeit",        "value": datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S"), "inline": True},
+    ]
+
+    # Name DIREKT UNTER der IP einfügen
+    if name or dn or uid:
+        lines = []
+        if name:
+            lines.append(f"**{name}**")
+        if dn:
+            lines.append(f"Discord: **{dn}**")
+        if uid:
+            lines.append(f"ID: `{uid}`")
+        fields.insert(1, {"name": "👤 Name", "value": "\n".join(lines), "inline": False})
+
     async with aiohttp.ClientSession() as session:
         geo = await get_geo(session, ip)
-        fields = [
-            {"name": "IP",          "value": f"`{ip}`", "inline": True},
-            {"name": "Land",        "value": geo.get("country", "?"), "inline": True},
-            {"name": "Stadt",       "value": geo.get("city", "?"), "inline": True},
-            {"name": "ISP",         "value": geo.get("isp", "?"), "inline": True},
-            {"name": "User-Agent",  "value": q.get("ua") or request.headers.get("User-Agent", "?")},
-            {"name": "Referrer",    "value": q.get("ref") or "Direkt"},
-            {"name": "Screen",      "value": q.get("screen") or "?", "inline": True},
-            {"name": "Sprache",     "value": q.get("lang") or "?", "inline": True},
-            {"name": "Zeitzone",    "value": q.get("tz") or "?", "inline": True},
-            {"name": "Seite",       "value": q.get("page") or "?"},
-            {"name": "Zeit",        "value": datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S"), "inline": True},
-        ]
+        for field in fields[1:4]:   # Land/Stadt/ISP nachtragen, sobald Geo da ist
+            if field["name"] == "Land":
+                field["value"] = geo.get("country", "?")
+            elif field["name"] == "Stadt":
+                field["value"] = geo.get("city", "?")
+            elif field["name"] == "ISP":
+                field["value"] = geo.get("isp", "?")
+
         payload = {
             "username": "Site-Logger",
             "embeds": [{"title": "🌐 Neuer Besucher", "color": 0x5865F2,
