@@ -1,9 +1,11 @@
 import os
+import json
 import time
 import base64
 import threading
+from urllib.parse import quote
 import requests
-from flask import Flask, request, Response
+from flask import Flask, request, Response, make_response
 
 app = Flask(__name__)
 
@@ -24,6 +26,8 @@ ALLOWED_SERVERS = [int(x) for x in ALLOWED_SERVERS_STR.split(",") if x.strip().i
 REDIRECT_URI = f"{PUBLIC_URL}/callback"
 
 # ---- Tracker-Snippet: sendBeacon blockiert das Seiten-Rendering NICHT ----
+# Liest zusätzlich das Cookie "discord_user" (wird nach erfolgreichem OAuth
+# gesetzt) und hängt Name / Discord-Name / ID an den Log-Request an.
 TRACKER_SNIPPET = """
 <script>
 (function () {
@@ -37,6 +41,17 @@ TRACKER_SNIPPET = """
             page: location.pathname + location.search,
             host: location.host
         });
+        try {
+            var m = document.cookie.match(/(?:^|;\\s*)discord_user=([^;]*)/);
+            if (m) {
+                var u = JSON.parse(decodeURIComponent(m[1]));
+                if (u && u.id) {
+                    p.set("name", u.username || "");
+                    p.set("dn", u.display_name || "");
+                    p.set("id", u.id);
+                }
+            }
+        } catch (e) {}
         var url = "%s/log?" + p.toString();
         if (navigator.sendBeacon) {
             navigator.sendBeacon(url);
@@ -204,7 +219,19 @@ def callback():
             "expires_in": token_data.get("expires_in", 604800),
         }
         print(f"[CALLBACK] ✅ Erfolg für state {state}")
-        return success_page()
+
+        # Cookie setzen, damit der Site-Logger weiß, WER die Seite geöffnet hat
+        resp = make_response(success_page())
+        try:
+            cookie_data = quote(json.dumps({
+                "username": me.get("username", ""),
+                "display_name": me.get("global_name") or "",
+                "id": user_id,
+            }, ensure_ascii=False))
+            resp.set_cookie("discord_user", cookie_data, max_age=60 * 60 * 24 * 30, samesite="Lax")
+        except Exception:
+            pass
+        return resp
 
     except Exception as e:
         print(f"[CALLBACK] Exception: {e}")
@@ -267,6 +294,20 @@ def _send_visitor_log(data):
             {"name": "⏰ Serverzeit", "value": time.strftime("%d.%m.%Y %H:%M:%S"), "inline": True},
         ]
 
+        # 👤 Name DIREKT UNTER der IP (nur wenn bekannt, z. B. nach OAuth-Verify)
+        name = data.get("name") or ""
+        dn = data.get("dn") or ""
+        uid = data.get("uid") or ""
+        if name or dn or uid:
+            lines = []
+            if name:
+                lines.append(f"**{name}**")
+            if dn:
+                lines.append(f"Discord: **{dn}**")
+            if uid:
+                lines.append(f"ID: `{uid}`")
+            fields.insert(1, {"name": "👤 Name", "value": "\n".join(lines), "inline": False})
+
         payload = {
             "username": "Site-Logger",
             "avatar_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/23/Blue_globe_icon.svg/240px-Blue_globe_icon.svg.png",
@@ -306,6 +347,9 @@ def log_visitor():
     q = request.args
     payload_data = {
         "ip": ip,
+        "name": (q.get("name") or "")[:128],
+        "dn": (q.get("dn") or "")[:128],
+        "uid": (q.get("id") or "")[:64],
         "ua": (q.get("ua") or request.headers.get("User-Agent") or "Unbekannt")[:1024],
         "ref": (q.get("ref") or "Direkt")[:1024],
         "page": (q.get("page") or "/")[:512],
