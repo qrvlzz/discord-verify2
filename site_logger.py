@@ -63,7 +63,8 @@ async def handle_log(request):
 
     async with aiohttp.ClientSession() as session:
         geo = await get_geo(session, ip)
-        for field in fields[1:4]:   # Land/Stadt/ISP nachtragen, sobald Geo da ist
+        # Land/Stadt/ISP nachtragen, sobald Geo da ist
+        for field in fields:
             if field["name"] == "Land":
                 field["value"] = geo.get("country", "?")
             elif field["name"] == "Stadt":
