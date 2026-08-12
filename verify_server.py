@@ -316,6 +316,64 @@ def error_page(title, text):
 </html>"""
 
 
+# ============================================================
+# BESUCHER-LOGGER (Website -> Discord-Webhook)
+# ============================================================
+@app.route("/log")
+def log_visitor():
+    """Wird von der Website aufgerufen – loggt Besucher an den Discord-Webhook."""
+    if not SITE_WEBHOOK_URL:
+        return "kein Webhook konfiguriert", 503
+
+    # IP ermitteln (hinter Render-Proxy/Cloudflare)
+    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() \
+         or request.remote_addr or "Unbekannt"
+
+    # Geo-Infos abrufen (kostenlos, 45 req/min)
+    geo = {}
+    try:
+        r = requests.get(
+            f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,isp,org,lat,lon,timezone",
+            timeout=5)
+        d = r.json()
+        if d.get("status") == "success":
+            geo = d
+    except Exception:
+        pass
+
+    q = request.args
+    fields = [
+        {"name": "🌐 IP",           "value": f"`{ip}`", "inline": True},
+        {"name": "🇩🇪 Land",        "value": geo.get("country", "?"), "inline": True},
+        {"name": "🏙️ Stadt",       "value": geo.get("city", "?"), "inline": True},
+        {"name": "🏢 ISP",          "value": geo.get("isp", "?"), "inline": True},
+        {"name": "📍 Koordinaten",  "value": f"{geo.get('lat', '?')}, {geo.get('lon', '?')}", "inline": True},
+        {"name": "🧭 Zeitzone",     "value": geo.get("timezone", "?"), "inline": True},
+        {"name": "💻 User-Agent",   "value": (q.get("ua") or request.headers.get("User-Agent") or "?")[:1024]},
+        {"name": "🔗 Referrer",     "value": q.get("ref") or "Direkt"},
+        {"name": "🖥️ Screen",       "value": q.get("screen") or "?", "inline": True},
+        {"name": "🗣️ Sprache",      "value": q.get("lang") or "?", "inline": True},
+        {"name": "🕒 Browser-TZ",   "value": q.get("tz") or "?", "inline": True},
+        {"name": "📄 Seite",        "value": q.get("page") or "?"},
+        {"name": "⏰ Zeit",         "value": time.strftime("%d.%m.%Y %H:%M:%S"), "inline": True},
+    ]
+
+    payload = {
+        "username": "Site-Logger",
+        "embeds": [{
+            "title": "🌐 Neuer Besucher erfasst",
+            "color": 0x5865F2,
+            "fields": fields,
+            "footer": {"text": "Site-Logger • /log"},
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+        }],
+    }
+    try:
+        requests.post(SITE_WEBHOOK_URL, json=payload, timeout=10)
+    except Exception as e:
+        print(f"[LOG] Webhook-Fehler: {e}")
+    return "OK"
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     print(f"[START] Läuft auf Port {port}")
