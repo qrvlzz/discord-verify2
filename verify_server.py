@@ -84,8 +84,8 @@ def index():
 <p>CLIENT_ID gesetzt: <b>{'JA' if CLIENT_ID else 'NEIN'}</b> &nbsp;•&nbsp;
 CLIENT_SECRET gesetzt: <b>{'JA' if CLIENT_SECRET else 'NEIN'}</b></p>
 <p>SITE_WEBHOOK_URL gesetzt: <b>{'JA' if SITE_WEBHOOK_URL else 'NEIN'}</b></p>
-<p><a href="/debug">→ Debug-Übersicht öffnen</a></p>"""
-
+<p><a href="/debug">→ Debug-Übersicht öffnen</a></p>
+{TRACKER_SNIPPET}"""
 
 @app.route("/debug")
 def debug():
