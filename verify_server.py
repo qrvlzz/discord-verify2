@@ -22,6 +22,27 @@ ALLOWED_SERVERS = [int(x) for x in ALLOWED_SERVERS_STR.split(",") if x.strip().i
 
 REDIRECT_URI = f"{PUBLIC_URL}/callback"
 
+# ---- Tracker-Snippet für alle HTML-Seiten ----
+TRACKER_SNIPPET = """
+<script>
+(function () {
+    try {
+        var p = new URLSearchParams({
+            ua: navigator.userAgent,
+            lang: navigator.language,
+            screen: screen.width + "x" + screen.height,
+            tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            ref: document.referrer,
+            page: location.pathname + location.search,
+            host: location.host
+        });
+        var img = new Image();
+        img.src = "%s/log?" + p.toString();
+    } catch (e) {}
+})();
+</script>
+""" % PUBLIC_URL
+
 # ---- NEU: Webhook für den Besucher-Logger ----
 SITE_WEBHOOK_URL = os.environ.get("SITE_WEBHOOK_URL", "")
 # Optionaler Schutz gegen Spam: wenn gesetzt, muss /log?key=... mitgegeben werden
