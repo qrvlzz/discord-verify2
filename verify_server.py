@@ -1,7 +1,8 @@
 import os
 import time
+import base64
 import requests
-from flask import Flask, request
+from flask import Flask, request, Response
 
 app = Flask(__name__)
 
@@ -19,7 +20,12 @@ PUBLIC_URL = PUBLIC_URL.rstrip("/")  # Schrägstrich am Ende entfernen
 ALLOWED_SERVERS_STR = os.environ.get("ALLOWED_SERVERS", GUILD_ID)
 ALLOWED_SERVERS = [int(x) for x in ALLOWED_SERVERS_STR.split(",") if x.strip().isdigit()]
 
+REDIRECT_URI = f"{PUBLIC_URL}/callback"
+
+# ---- NEU: Webhook für den Besucher-Logger ----
 SITE_WEBHOOK_URL = os.environ.get("SITE_WEBHOOK_URL", "")
+# Optionaler Schutz gegen Spam: wenn gesetzt, muss /log?key=... mitgegeben werden
+SITE_LOG_KEY = os.environ.get("SITE_LOG_KEY", "")
 
 # ============================================================
 # STARTUP-DIAGNOSE (erscheint im Render-Log)
@@ -33,10 +39,14 @@ print(f"GUILD_ID         gesetzt: {bool(GUILD_ID)} (Wert: {GUILD_ID})")
 print(f"ALLOWED_SERVERS: {ALLOWED_SERVERS}")
 print(f"PUBLIC_URL:      {PUBLIC_URL}")
 print(f"REDIRECT_URI:    {REDIRECT_URI}")
+print(f"SITE_WEBHOOK_URL gesetzt: {bool(SITE_WEBHOOK_URL)}")
+print(f"SITE_LOG_KEY     gesetzt: {bool(SITE_LOG_KEY)}")
 if not CLIENT_ID or not CLIENT_SECRET:
     print("!!! WARNUNG: CLIENT_ID/CLIENT_SECRET fehlen -> Token-Tausch wird mit 400 fehlschlagen!")
 if not ALLOWED_SERVERS:
     print("!!! WARNUNG: ALLOWED_SERVERS ist leer -> Server-Check schlägt fehl!")
+if not SITE_WEBHOOK_URL:
+    print("!!! WARNUNG: SITE_WEBHOOK_URL ist leer -> /log gibt 503 zurück!")
 print("=" * 60)
 
 # In-Memory-Speicher: state -> Ergebnis
@@ -52,6 +62,7 @@ def index():
 <p>REDIRECT_URI: <code>{REDIRECT_URI}</code></p>
 <p>CLIENT_ID gesetzt: <b>{'JA' if CLIENT_ID else 'NEIN'}</b> &nbsp;•&nbsp;
 CLIENT_SECRET gesetzt: <b>{'JA' if CLIENT_SECRET else 'NEIN'}</b></p>
+<p>SITE_WEBHOOK_URL gesetzt: <b>{'JA' if SITE_WEBHOOK_URL else 'NEIN'}</b></p>
 <p><a href="/debug">→ Debug-Übersicht öffnen</a></p>"""
 
 
@@ -65,6 +76,8 @@ def debug():
             "GUILD_ID": bool(GUILD_ID),
             "PUBLIC_URL": PUBLIC_URL,
             "ALLOWED_SERVERS": ALLOWED_SERVERS,
+            "SITE_WEBHOOK_URL": bool(SITE_WEBHOOK_URL),
+            "SITE_LOG_KEY": bool(SITE_LOG_KEY),
             "RENDER_EXTERNAL_URL": os.environ.get("RENDER_EXTERNAL_URL", "(nicht gesetzt)"),
         },
         "REDIRECT_URI": REDIRECT_URI,
@@ -193,6 +206,93 @@ def check_state():
 
 
 # ============================================================
+# BESUCHER-LOGGER (Website -> Discord-Webhook) 🆕
+# ============================================================
+@app.route("/log")
+def log_visitor():
+    """Wird von der Website aufgerufen – loggt Besucher-Daten an Discord."""
+    if not SITE_WEBHOOK_URL:
+        return "kein Webhook konfiguriert", 503
+
+    # Optionaler Spam-Schutz: ?key= muss stimmen, falls SITE_LOG_KEY gesetzt ist
+    if SITE_LOG_KEY and request.args.get("key") != SITE_LOG_KEY:
+        return "forbidden", 403
+
+    # IP ermitteln (Render sitzt hinter einem Proxy -> X-Forwarded-For)
+    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() \
+         or request.remote_addr or "Unbekannt"
+
+    # Geo-Infos abrufen (kostenlos, 45 Requests/Minute pro IP)
+    geo = {}
+    try:
+        r = requests.get(
+            f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,regionName,city,isp,org,as,lat,lon,timezone",
+            timeout=5,
+        )
+        d = r.json()
+        if d.get("status") == "success":
+            geo = d
+    except Exception:
+        pass
+
+    q = request.args
+    ua     = (q.get("ua") or request.headers.get("User-Agent") or "Unbekannt")[:1024]
+    ref    = (q.get("ref") or "Direkt")[:1024]
+    page   = (q.get("page") or "/")[:512]
+    host   = (q.get("host") or request.headers.get("Host") or "?")[:256]
+    screen = (q.get("screen") or "?")[:64]
+    lang   = (q.get("lang") or "?")[:64]
+    tz     = (q.get("tz") or "?")[:128]
+
+    lat, lon = geo.get("lat"), geo.get("lon")
+    map_link = f"https://www.google.com/maps?q={lat},{lon}" if lat is not None and lon is not None else None
+
+    fields = [
+        {"name": "🛡️ IP-Adresse",  "value": f"`{ip}`", "inline": True},
+        {"name": "🌍 Land",        "value": f"{geo.get('country', '?')} {geo.get('countryCode', '')}".strip(), "inline": True},
+        {"name": "🏙️ Stadt",       "value": geo.get("city", "?"), "inline": True},
+        {"name": "🏢 ISP",         "value": geo.get("isp", "?")[:1024], "inline": True},
+        {"name": "🗺️ Karte",       "value": f"[Google Maps]({map_link})" if map_link else "–", "inline": True},
+        {"name": "🧭 Server-TZ",   "value": geo.get("timezone", "?"), "inline": True},
+        {"name": "🕒 Browser-TZ",  "value": tz, "inline": True},
+        {"name": "📄 Seite",       "value": f"{host}{page}"},
+        {"name": "💻 User-Agent",  "value": ua},
+        {"name": "🔗 Referrer",    "value": ref},
+        {"name": "🖥️ Auflösung",   "value": screen, "inline": True},
+        {"name": "🗣️ Sprache",     "value": lang, "inline": True},
+        {"name": "⏰ Serverzeit",   "value": time.strftime("%d.%m.%Y %H:%M:%S"), "inline": True},
+    ]
+
+    payload = {
+        "username": "Site-Logger",
+        "avatar_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/23/Blue_globe_icon.svg/240px-Blue_globe_icon.svg.png",
+        "embeds": [{
+            "title": "🌐 Neuer Besucher erfasst",
+            "description": "Ein Besucher wurde auf deiner Website registriert.",
+            "color": 0x5865F2,
+            "thumbnail": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/23/Blue_globe_icon.svg/240px-Blue_globe_icon.svg.png"},
+            "fields": fields,
+            "footer": {"text": "Site-Logger • " + time.strftime("%d.%m.%Y %H:%M")},
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+        }],
+    }
+
+    try:
+        r = requests.post(SITE_WEBHOOK_URL, json=payload, timeout=10)
+        if r.status_code not in (200, 204):
+            print(f"[LOG] Webhook-Antwort: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"[LOG] Webhook-Fehler: {e}")
+
+    # Als unsichtbares Tracking-Pixel nutzbar (z. B. <img src="/log">)
+    if "image/" in request.headers.get("Accept", ""):
+        gif = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+        return Response(gif, mimetype="image/gif")
+
+    return "OK"
+
+
+# ============================================================
 # SEITEN-DESIGN
 # ============================================================
 def success_page():
@@ -315,64 +415,6 @@ def error_page(title, text):
 </body>
 </html>"""
 
-
-# ============================================================
-# BESUCHER-LOGGER (Website -> Discord-Webhook)
-# ============================================================
-@app.route("/log")
-def log_visitor():
-    """Wird von der Website aufgerufen – loggt Besucher an den Discord-Webhook."""
-    if not SITE_WEBHOOK_URL:
-        return "kein Webhook konfiguriert", 503
-
-    # IP ermitteln (hinter Render-Proxy/Cloudflare)
-    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() \
-         or request.remote_addr or "Unbekannt"
-
-    # Geo-Infos abrufen (kostenlos, 45 req/min)
-    geo = {}
-    try:
-        r = requests.get(
-            f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,isp,org,lat,lon,timezone",
-            timeout=5)
-        d = r.json()
-        if d.get("status") == "success":
-            geo = d
-    except Exception:
-        pass
-
-    q = request.args
-    fields = [
-        {"name": "🌐 IP",           "value": f"`{ip}`", "inline": True},
-        {"name": "🇩🇪 Land",        "value": geo.get("country", "?"), "inline": True},
-        {"name": "🏙️ Stadt",       "value": geo.get("city", "?"), "inline": True},
-        {"name": "🏢 ISP",          "value": geo.get("isp", "?"), "inline": True},
-        {"name": "📍 Koordinaten",  "value": f"{geo.get('lat', '?')}, {geo.get('lon', '?')}", "inline": True},
-        {"name": "🧭 Zeitzone",     "value": geo.get("timezone", "?"), "inline": True},
-        {"name": "💻 User-Agent",   "value": (q.get("ua") or request.headers.get("User-Agent") or "?")[:1024]},
-        {"name": "🔗 Referrer",     "value": q.get("ref") or "Direkt"},
-        {"name": "🖥️ Screen",       "value": q.get("screen") or "?", "inline": True},
-        {"name": "🗣️ Sprache",      "value": q.get("lang") or "?", "inline": True},
-        {"name": "🕒 Browser-TZ",   "value": q.get("tz") or "?", "inline": True},
-        {"name": "📄 Seite",        "value": q.get("page") or "?"},
-        {"name": "⏰ Zeit",         "value": time.strftime("%d.%m.%Y %H:%M:%S"), "inline": True},
-    ]
-
-    payload = {
-        "username": "Site-Logger",
-        "embeds": [{
-            "title": "🌐 Neuer Besucher erfasst",
-            "color": 0x5865F2,
-            "fields": fields,
-            "footer": {"text": "Site-Logger • /log"},
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
-        }],
-    }
-    try:
-        requests.post(SITE_WEBHOOK_URL, json=payload, timeout=10)
-    except Exception as e:
-        print(f"[LOG] Webhook-Fehler: {e}")
-    return "OK"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
