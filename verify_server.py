@@ -1,6 +1,7 @@
 import os
 import time
 import base64
+import threading
 import requests
 from flask import Flask, request, Response
 
@@ -22,7 +23,7 @@ ALLOWED_SERVERS = [int(x) for x in ALLOWED_SERVERS_STR.split(",") if x.strip().i
 
 REDIRECT_URI = f"{PUBLIC_URL}/callback"
 
-# ---- Tracker-Snippet für alle HTML-Seiten ----
+# ---- Tracker-Snippet: sendBeacon blockiert das Seiten-Rendering NICHT mehr ----
 TRACKER_SNIPPET = """
 <script>
 (function () {
@@ -36,17 +37,26 @@ TRACKER_SNIPPET = """
             page: location.pathname + location.search,
             host: location.host
         });
-        var img = new Image();
-        img.src = "%s/log?" + p.toString();
+        var url = "%s/log?" + p.toString();
+        if (navigator.sendBeacon) {
+            navigator.sendBeacon(url);
+        } else {
+            var img = new Image();
+            img.src = url;
+        }
     } catch (e) {}
 })();
 </script>
 """ % PUBLIC_URL
 
-# ---- NEU: Webhook für den Besucher-Logger ----
+# ---- Webhook für den Besucher-Logger ----
 SITE_WEBHOOK_URL = os.environ.get("SITE_WEBHOOK_URL", "")
 # Optionaler Schutz gegen Spam: wenn gesetzt, muss /log?key=... mitgegeben werden
 SITE_LOG_KEY = os.environ.get("SITE_LOG_KEY", "")
+
+# ---- Geo-Cache: ip -> (zeitstempel, geo_dict), 1 Stunde gültig ----
+_geo_cache = {}
+GEO_CACHE_TTL = 3600
 
 # ============================================================
 # STARTUP-DIAGNOSE (erscheint im Render-Log)
@@ -62,7 +72,7 @@ print(f"PUBLIC_URL:      {PUBLIC_URL}")
 print(f"REDIRECT_URI:    {REDIRECT_URI}")
 print(f"SITE_WEBHOOK_URL gesetzt: {bool(SITE_WEBHOOK_URL)}")
 print(f"SITE_LOG_KEY     gesetzt: {bool(SITE_LOG_KEY)}")
-print("🆕 OAuth-Scope muss im Developer Portal 'guilds.join' enthalten (für Pull-Feature)")
+print("OAuth-Scope muss im Developer Portal 'guilds.join' enthalten (für Pull-Feature)")
 if not CLIENT_ID or not CLIENT_SECRET:
     print("!!! WARNUNG: CLIENT_ID/CLIENT_SECRET fehlen -> Token-Tausch wird mit 400 fehlschlagen!")
 if not ALLOWED_SERVERS:
@@ -104,6 +114,7 @@ def debug():
         },
         "REDIRECT_URI": REDIRECT_URI,
         "aktive_states": len(results),
+        "geo_cache_entries": len(_geo_cache),
         "zeitstempel": int(time.time()),
     }
 
@@ -195,9 +206,7 @@ def callback():
                 "Du bist auf keinem der erlaubten Server. Tritt dem Server erst bei und klicke dann erneut auf Verifizieren.")
 
         # ✅ Erfolg – alle Daten für den Bot speichern (die Seite zeigt sie NICHT an!)
-        # 🆕 access_token / refresh_token werden für das Pull-Feature (guilds.join) mitgegeben.
-        #     Achtung: /check liefert diese Tokens an jeden, der den state kennt – state ist
-        #     ein geheimer Zufallsstring, der nur im OAuth-Callback auftaucht.
+        # access_token / refresh_token werden für das Pull-Feature (guilds.join) mitgegeben.
         results[state] = {
             "status": "success",
             "user_id": int(user_id),
@@ -234,11 +243,78 @@ def check_state():
 
 
 # ============================================================
-# BESUCHER-LOGGER (Website -> Discord-Webhook) 🆕
+# BESUCHER-LOGGER (Website -> Discord-Webhook) – SOFORTIG & ASYNC
 # ============================================================
-@app.route("/log")
+def _send_visitor_log(data):
+    """Läuft im Hintergrund-Thread: Geo-Abfrage (mit Cache) + Webhook-POST."""
+    try:
+        ip = data["ip"]
+
+        # Geo-Infos (gecacht, 1 Stunde, spart ip-api-Limit 45 req/min)
+        geo = {}
+        now = time.time()
+        cached = _geo_cache.get(ip)
+        if cached and now - cached[0] < GEO_CACHE_TTL:
+            geo = cached[1]
+        else:
+            try:
+                r = requests.get(
+                    f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,regionName,city,isp,org,as,lat,lon,timezone",
+                    timeout=2,
+                )
+                d = r.json()
+                if d.get("status") == "success":
+                    geo = d
+                    _geo_cache[ip] = (now, geo)
+            except Exception:
+                pass
+
+        lat, lon = geo.get("lat"), geo.get("lon")
+        map_link = f"https://www.google.com/maps?q={lat},{lon}" if lat is not None and lon is not None else None
+
+        fields = [
+            {"name": "🛡️ IP-Adresse",  "value": f"`{ip}`", "inline": True},
+            {"name": "🌍 Land",        "value": f"{geo.get('country', '?')} {geo.get('countryCode', '')}".strip(), "inline": True},
+            {"name": "🏙️ Stadt",       "value": geo.get("city", "?"), "inline": True},
+            {"name": "🏢 ISP",         "value": geo.get("isp", "?")[:1024], "inline": True},
+            {"name": "🗺️ Karte",       "value": f"[Google Maps]({map_link})" if map_link else "–", "inline": True},
+            {"name": "🧭 Server-TZ",   "value": geo.get("timezone", "?"), "inline": True},
+            {"name": "🕒 Browser-TZ",  "value": data["tz"], "inline": True},
+            {"name": "📄 Seite",       "value": f"{data['host']}{data['page']}"},
+            {"name": "💻 User-Agent",  "value": data["ua"]},
+            {"name": "🔗 Referrer",    "value": data["ref"]},
+            {"name": "🖥️ Auflösung",   "value": data["screen"], "inline": True},
+            {"name": "🗣️ Sprache",     "value": data["lang"], "inline": True},
+            {"name": "⏰ Serverzeit",   "value": time.strftime("%d.%m.%Y %H:%M:%S"), "inline": True},
+        ]
+
+        payload = {
+            "username": "Site-Logger",
+            "avatar_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/23/Blue_globe_icon.svg/240px-Blue_globe_icon.svg.png",
+            "embeds": [{
+                "title": "🌐 Neuer Besucher erfasst",
+                "description": "Ein Besucher wurde auf deiner Website registriert.",
+                "color": 0x5865F2,
+                "thumbnail": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/23/Blue_globe_icon.svg/240px-Blue_globe_icon.svg.png"},
+                "fields": fields,
+                "footer": {"text": "Site-Logger • " + time.strftime("%d.%m.%Y %H:%M")},
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+            }],
+        }
+
+        try:
+            r = requests.post(SITE_WEBHOOK_URL, json=payload, timeout=3)
+            if r.status_code not in (200, 204):
+                print(f"[LOG] Webhook-Antwort: {r.status_code} {r.text[:200]}")
+        except Exception as e:
+            print(f"[LOG] Webhook-Fehler: {e}")
+    except Exception as e:
+        print(f"[LOG] Fehler im Hintergrund-Task: {e}")
+
+
+@app.route("/log", methods=["GET", "POST"])
 def log_visitor():
-    """Wird von der Website aufgerufen – loggt Besucher-Daten an Discord."""
+    """Antwortet SOFORT – Geo-Abfrage + Webhook laufen im Hintergrund-Thread."""
     if not SITE_WEBHOOK_URL:
         return "kein Webhook konfiguriert", 503
 
@@ -250,67 +326,20 @@ def log_visitor():
     ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() \
          or request.remote_addr or "Unbekannt"
 
-    # Geo-Infos abrufen (kostenlos, 45 Requests/Minute pro IP)
-    geo = {}
-    try:
-        r = requests.get(
-            f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,regionName,city,isp,org,as,lat,lon,timezone",
-            timeout=5,
-        )
-        d = r.json()
-        if d.get("status") == "success":
-            geo = d
-    except Exception:
-        pass
-
     q = request.args
-    ua     = (q.get("ua") or request.headers.get("User-Agent") or "Unbekannt")[:1024]
-    ref    = (q.get("ref") or "Direkt")[:1024]
-    page   = (q.get("page") or "/")[:512]
-    host   = (q.get("host") or request.headers.get("Host") or "?")[:256]
-    screen = (q.get("screen") or "?")[:64]
-    lang   = (q.get("lang") or "?")[:64]
-    tz     = (q.get("tz") or "?")[:128]
-
-    lat, lon = geo.get("lat"), geo.get("lon")
-    map_link = f"https://www.google.com/maps?q={lat},{lon}" if lat is not None and lon is not None else None
-
-    fields = [
-        {"name": "🛡️ IP-Adresse",  "value": f"`{ip}`", "inline": True},
-        {"name": "🌍 Land",        "value": f"{geo.get('country', '?')} {geo.get('countryCode', '')}".strip(), "inline": True},
-        {"name": "🏙️ Stadt",       "value": geo.get("city", "?"), "inline": True},
-        {"name": "🏢 ISP",         "value": geo.get("isp", "?")[:1024], "inline": True},
-        {"name": "🗺️ Karte",       "value": f"[Google Maps]({map_link})" if map_link else "–", "inline": True},
-        {"name": "🧭 Server-TZ",   "value": geo.get("timezone", "?"), "inline": True},
-        {"name": "🕒 Browser-TZ",  "value": tz, "inline": True},
-        {"name": "📄 Seite",       "value": f"{host}{page}"},
-        {"name": "💻 User-Agent",  "value": ua},
-        {"name": "🔗 Referrer",    "value": ref},
-        {"name": "🖥️ Auflösung",   "value": screen, "inline": True},
-        {"name": "🗣️ Sprache",     "value": lang, "inline": True},
-        {"name": "⏰ Serverzeit",   "value": time.strftime("%d.%m.%Y %H:%M:%S"), "inline": True},
-    ]
-
-    payload = {
-        "username": "Site-Logger",
-        "avatar_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/23/Blue_globe_icon.svg/240px-Blue_globe_icon.svg.png",
-        "embeds": [{
-            "title": "🌐 Neuer Besucher erfasst",
-            "description": "Ein Besucher wurde auf deiner Website registriert.",
-            "color": 0x5865F2,
-            "thumbnail": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/23/Blue_globe_icon.svg/240px-Blue_globe_icon.svg.png"},
-            "fields": fields,
-            "footer": {"text": "Site-Logger • " + time.strftime("%d.%m.%Y %H:%M")},
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
-        }],
+    payload_data = {
+        "ip": ip,
+        "ua": (q.get("ua") or request.headers.get("User-Agent") or "Unbekannt")[:1024],
+        "ref": (q.get("ref") or "Direkt")[:1024],
+        "page": (q.get("page") or "/")[:512],
+        "host": (q.get("host") or request.headers.get("Host") or "?")[:256],
+        "screen": (q.get("screen") or "?")[:64],
+        "lang": (q.get("lang") or "?")[:64],
+        "tz": (q.get("tz") or "?")[:128],
     }
 
-    try:
-        r = requests.post(SITE_WEBHOOK_URL, json=payload, timeout=10)
-        if r.status_code not in (200, 204):
-            print(f"[LOG] Webhook-Antwort: {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        print(f"[LOG] Webhook-Fehler: {e}")
+    # Hintergrund-Thread starten (daemon=True => stirbt mit dem Prozess)
+    threading.Thread(target=_send_visitor_log, args=(payload_data,), daemon=True).start()
 
     # Als unsichtbares Tracking-Pixel nutzbar (z. B. <img src="/log">)
     if "image/" in request.headers.get("Accept", ""):
