@@ -374,7 +374,8 @@ def success_page():
     <h1>Du hast dich erfolgreich verifiziert ✅</h1>
     <p>Dein Konto wurde bestätigt.<br>Du kannst dieses Fenster jetzt schließen.</p>
     <a class="btn" href="https://discord.com/channels/__GUILD_ID__">Zurück zu Discord</a>
-  </div>
+</div>
+{TRACKER_SNIPPET}
 </body>
 </html>""".replace("__GUILD_ID__", GUILD_ID or "")
 
