@@ -62,6 +62,7 @@ print(f"PUBLIC_URL:      {PUBLIC_URL}")
 print(f"REDIRECT_URI:    {REDIRECT_URI}")
 print(f"SITE_WEBHOOK_URL gesetzt: {bool(SITE_WEBHOOK_URL)}")
 print(f"SITE_LOG_KEY     gesetzt: {bool(SITE_LOG_KEY)}")
+print("🆕 OAuth-Scope muss im Developer Portal 'guilds.join' enthalten (für Pull-Feature)")
 if not CLIENT_ID or not CLIENT_SECRET:
     print("!!! WARNUNG: CLIENT_ID/CLIENT_SECRET fehlen -> Token-Tausch wird mit 400 fehlschlagen!")
 if not ALLOWED_SERVERS:
@@ -112,7 +113,7 @@ def oauth_error_hint(err):
         "invalid_client": "CLIENT_ID oder CLIENT_SECRET fehlen/falsch auf Render → Environment prüfen und NEU deployen.",
         "redirect_uri_mismatch": "redirect_uri stimmt nicht überein → REDIRECT_URI EXAKT im Developer Portal eintragen.",
         "invalid_grant": "Dieser Code wurde schon verwendet oder ist abgelaufen → Neuen Verify-Button-Klick starten.",
-        "invalid_scope": "Scope im OAuth-Link stimmt nicht → Bot-Code prüfen (identify email guilds).",
+        "invalid_scope": "Scope im OAuth-Link stimmt nicht → Bot-Code prüfen (identify email guilds guilds.join).",
     }
     return hints.get(err, "Siehe Render-Logs für Details.")
 
@@ -194,6 +195,9 @@ def callback():
                 "Du bist auf keinem der erlaubten Server. Tritt dem Server erst bei und klicke dann erneut auf Verifizieren.")
 
         # ✅ Erfolg – alle Daten für den Bot speichern (die Seite zeigt sie NICHT an!)
+        # 🆕 access_token / refresh_token werden für das Pull-Feature (guilds.join) mitgegeben.
+        #     Achtung: /check liefert diese Tokens an jeden, der den state kennt – state ist
+        #     ein geheimer Zufallsstring, der nur im OAuth-Callback auftaucht.
         results[state] = {
             "status": "success",
             "user_id": int(user_id),
@@ -204,6 +208,9 @@ def callback():
                 {"id": g.get("id"), "name": g.get("name"), "joined_at": g.get("joined_at")}
                 for g in guilds if g.get("id")
             ],
+            "access_token": token_data.get("access_token", ""),
+            "refresh_token": token_data.get("refresh_token", ""),
+            "expires_in": token_data.get("expires_in", 604800),
         }
         print(f"[CALLBACK] ✅ Erfolg gespeichert für state {state}")
         return success_page()
